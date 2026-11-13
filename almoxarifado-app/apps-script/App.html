@@ -1,0 +1,761 @@
+<script>
+/* =====================================================================
+   APP ALMOXARIFADO · Escola de Bombeiros · 3 MN
+   Tudo roda no celular do almoxarife. Os lançamentos confirmados vão
+   para uma FILA guardada no celular e sobem para as planilhas assim que
+   houver sinal (sinal fraco não perde nada).
+   ===================================================================== */
+
+var CH = { FILA: 'almox_fila_v1', DADOS: 'almox_dados_v1', PIN: 'almox_pin_v1', PROX: 'almox_prox_v1', ERROS: 'almox_erros_v1' };
+var SISTEMAS = [
+  { s: 'HID', n: 'Água', ic: '💧' }, { s: 'SAN', n: 'Esgoto', ic: '🚽' }, { s: 'ELE', n: 'Elétrica', ic: '⚡' },
+  { s: 'CON', n: 'Consumível', ic: '🧴' }, { s: 'FER', n: 'Ferragem', ic: '🔩' }, { s: 'EPI', n: 'Segurança', ic: '🦺' },
+  { s: 'EST', n: 'Estrutura', ic: '🏗️' }, { s: 'FOR', n: 'Forma/madeira', ic: '🪵' }, { s: 'DIV', n: 'Diversos', ic: '📦' }
+];
+
+var S = {
+  dados: null, pin: '', op: null, pk: null, pickCb: null, eqSel: null,
+  resultados: {}, enviando: false, offline: false, ultimoId: null, voltarPara: null
+};
+
+// ------------------------------------------------------------ utilidades
+function $(id) { return document.getElementById(id); }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+function norm(s) { return String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/\s+/g, ' ').trim(); }
+function ler(k, padrao) { try { var v = localStorage.getItem(k); return v ? JSON.parse(v) : padrao; } catch (e) { return padrao; } }
+function grava(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* cheio */ } }
+function hojeLocal() { var d = new Date(); return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
+function br(k) { var m = String(k || '').match(/^(\d{4})-(\d{2})-(\d{2})$/); return m ? m[3] + '/' + m[2] + '/' + m[1] : k; }
+function uid() { return 'op-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8); }
+function pad(n, t) { return ('000000' + n).slice(-t); }
+function fmtN(n) { n = Number(n) || 0; return (Math.round(n * 100) / 100).toString().replace('.', ','); }
+function numBR(v) { return Number(String(v || '').replace(',', '.')) || 0; }
+function render(html) { $('app').innerHTML = html; window.scrollTo(0, 0); }
+function aviso(txt, ms) {
+  var a = $('aviso'); a.textContent = txt; a.classList.remove('escondido');
+  clearTimeout(aviso.t); aviso.t = setTimeout(function () { a.classList.add('escondido'); }, ms || 3500);
+}
+function topo(titulo, voltar) {
+  return '<div class="topo"><button class="voltar" onclick="' + (voltar || 'telaInicio()') + '">◀ Voltar</button><h2 style="margin:0">' + titulo + '</h2></div>';
+}
+
+function rpc(fn) {
+  var args = Array.prototype.slice.call(arguments, 1);
+  return new Promise(function (ok, falha) {
+    var r = google.script.run.withSuccessHandler(ok).withFailureHandler(falha);
+    r[fn].apply(r, args);
+  });
+}
+
+// ------------------------------------------------------------ dados
+function item(cod) {
+  var c = S.dados.cadastro;
+  for (var i = 0; i < c.length; i++) if (c[i].c === cod) return c[i];
+  return null;
+}
+function saldo(cod) { return S.dados.saldos[cod] || null; }
+function chipSaldo(cod) {
+  var s = saldo(cod);
+  if (!s) return '<span class="chip am">sem saldo</span>';
+  var cls = s.saldo < 0 ? 'neg' : (norm(s.sit).indexOf('SEM CONT') >= 0 ? 'am' : 'ok');
+  return '<span class="chip ' + cls + '">' + fmtN(s.saldo) + ' ' + esc(s.un || '') + '</span>';
+}
+function pecaDe(cod) {
+  var p = String(cod).split('-');
+  return (p.length >= 3 && S.dados.pecas[p[1]]) ? p[1] : 'OUT';
+}
+
+function carregar(silencioso) {
+  return rpc('api_iniciar', S.pin).then(function (r) {
+    if (!r.ok) {
+      if (r.erro === 'PIN_INVALIDO') { grava(CH.PIN, ''); S.pin = ''; telaPin(S.pinErrado ? 'PIN errado. Tente de novo.' : ''); S.pinErrado = true; return false; }
+      if (!silencioso) render('<div class="erro">' + esc(r.erro) + '</div><button class="btn sec" onclick="location.reload()">Tentar de novo</button>');
+      return false;
+    }
+    S.pinErrado = false;
+    S.dados = r; grava(CH.DADOS, r); grava(CH.PIN, S.pin);
+    reaplicarFila();
+    faixa();
+    return true;
+  }).catch(function () {
+    S.offline = true; faixa();
+    if (!S.dados && !silencioso) render('<div class="erro">Sem internet para abrir o app pela primeira vez. Tente de novo quando tiver sinal.</div><button class="btn sec" onclick="location.reload()">Tentar de novo</button>');
+    return false;
+  });
+}
+
+/** Proxima folha/linha do caderno, considerando o que já foi lançado neste celular. */
+function proxFolha(pref) {
+  var srv = S.dados[pref === 'CAD' ? 'proxCad' : 'proxCeq'];
+  var loc = ler(CH.PROX, {})[pref];
+  if (loc && (loc.folha > srv.folha || (loc.folha === srv.folha && loc.linha > srv.linha))) return loc;
+  return srv;
+}
+function avancarFolha(pref, folha, linha, n) {
+  var p = ler(CH.PROX, {});
+  var l = linha + n, f = folha;
+  if (l > S.dados.linhasPorFolha) { f++; l = 1; }
+  p[pref] = { folha: f, linha: l };
+  grava(CH.PROX, p);
+}
+
+// ------------------------------------------------------------ fila (sinal fraco)
+function fila() { return ler(CH.FILA, []); }
+
+/** Aplica no saldo da tela o que ainda está na fila (para o Jean ver o saldo certo). */
+function aplicarLocal(op) {
+  var d = S.dados;
+  (op.itens || []).forEach(function (it) {
+    var q = numBR(it.qtd);
+    if (op.tipo === 'SAIDA' || (op.tipo === 'DEVOLUCAO' && it.estado !== 'NAO_ACEITO')) {
+      var sinal = op.tipo === 'SAIDA' ? -1 : 1;
+      if (!d.saldos[it.codigo]) d.saldos[it.codigo] = { saldo: 0, sit: 'SEM CONTAGEM', un: '' };
+      d.saldos[it.codigo].saldo += sinal * q;
+      var k = norm(op.pessoa);
+      if (!d.abertos[k]) d.abertos[k] = { nome: op.pessoa, itens: {} };
+      d.abertos[k].itens[it.codigo] = (d.abertos[k].itens[it.codigo] || 0) - sinal * q;
+      if (d.abertos[k].itens[it.codigo] <= 0) delete d.abertos[k].itens[it.codigo];
+    }
+    if (op.tipo === 'RETIRADA_EQ' || op.tipo === 'DEVOLUCAO_EQ') {
+      d.equip.forEach(function (x) {
+        if (x.c !== it.codigo) return;
+        var ret = op.tipo === 'RETIRADA_EQ';
+        var nome = ret ? op.pessoa : (it.de || op.pessoa);
+        var f = x.fora.filter(function (y) { return norm(y.nome) === norm(nome); })[0];
+        if (!f) { f = { nome: nome, qtd: 0, desde: op.data }; x.fora.push(f); }
+        f.qtd += ret ? q : -q;
+        if (ret) f.desde = op.data;
+        x.fora = x.fora.filter(function (y) { return y.qtd > 0; });
+        x.qtdFora = x.fora.reduce(function (a, y) { return a + y.qtd; }, 0);
+        x.disp = Math.max(0, x.lote - x.qtdFora);
+        if (!ret && x.lote === 1 && it.estado && it.estado !== 'OK') x.st = 'Em manutenção';
+      });
+    }
+  });
+  if (op.pessoa && d.pessoas.map(norm).indexOf(norm(op.pessoa)) < 0) d.pessoas.unshift(op.pessoa);
+}
+function reaplicarFila() { fila().forEach(aplicarLocal); }
+
+function enfileirar(op) {
+  var f = fila(); f.push(op); grava(CH.FILA, f);
+  aplicarLocal(op); // o cache (CH.DADOS) guarda só o que veio da planilha; a fila é reaplicada por cima
+  faixa();
+  processarFila();
+}
+
+function processarFila() {
+  if (S.enviando) return;
+  var f = fila();
+  if (!f.length) { faixa(); return; }
+  S.enviando = true;
+  var op = f[0];
+  rpc('api_registrar', op).then(function (r) {
+    S.offline = false;
+    var g = fila(); if (g.length && g[0].id === op.id) { g.shift(); grava(CH.FILA, g); }
+    S.resultados[op.id] = r;
+    if (!r.ok) {
+      var e = ler(CH.ERROS, []); e.push({ quando: new Date().toLocaleString('pt-BR'), tipo: op.tipo, pessoa: op.pessoa, itens: resumoItens(op), erro: r.erro });
+      grava(CH.ERROS, e);
+      if (S.ultimoId !== op.id) aviso('⚠ Um lançamento NÃO foi gravado. Veja na tela inicial.', 6000);
+    }
+    if (S.ultimoId === op.id && S.telaAtual === 'resultado') telaResultado();
+    S.enviando = false;
+    if (fila().length) processarFila();
+    else { faixa(); setTimeout(function () { if (!fila().length) carregar(true).then(function () { if (S.telaAtual === 'inicio') telaInicio(); }); }, 1500); }
+  }).catch(function () {
+    S.enviando = false; S.offline = true; faixa();
+    if (S.ultimoId === op.id && S.telaAtual === 'resultado') telaResultado();
+  });
+}
+setInterval(processarFila, 20000);
+window.addEventListener('online', processarFila);
+
+function resumoItens(op) {
+  return (op.itens || []).map(function (i) { return (i.codigo || i.descricao) + ' x' + i.qtd; }).join(', ') || op.descricao || '';
+}
+
+function faixa() {
+  var h = '';
+  if (S.dados && S.dados.teste) h += '<div class="faixa teste">MODO TESTE · grava nas cópias das planilhas</div>';
+  var n = fila().length;
+  if (n) h += '<div class="faixa ' + (S.offline ? 'off' : 'fila') + '">' + (S.offline ? '📵 Sem sinal. ' : '⏳ ') + n + ' lançamento(s) esperando para subir</div>';
+  $('faixa').innerHTML = h;
+}
+
+// ------------------------------------------------------------ PIN
+function telaPin(msg) {
+  S.telaAtual = 'pin';
+  S.pinDig = '';
+  var t = '';
+  [1, 2, 3, 4, 5, 6, 7, 8, 9].forEach(function (n) { t += '<button onclick="pinTecla(' + n + ')">' + n + '</button>'; });
+  t += '<button onclick="pinTecla(\'c\')">⌫</button><button onclick="pinTecla(0)">0</button><button onclick="pinTecla(\'ok\')">OK</button>';
+  render('<h1>Almoxarifado</h1><p class="sub">Escola de Bombeiros · 3 MN</p>' + (msg ? '<div class="erro">' + esc(msg) + '</div>' : '') +
+    '<p style="text-align:center;margin-top:30px">Digite o PIN</p><div id="pinv" class="pin-vis"></div><div class="pin">' + t + '</div>');
+}
+function pinTecla(k) {
+  if (k === 'c') S.pinDig = S.pinDig.slice(0, -1);
+  else if (k === 'ok') { S.pin = S.pinDig; render('<div class="carregando">Abrindo…</div>'); carregar().then(function (ok) { if (ok) telaInicio(); }); return; }
+  else if (S.pinDig.length < 8) S.pinDig += k;
+  $('pinv').textContent = S.pinDig.replace(/./g, '●');
+}
+
+// ------------------------------------------------------------ INÍCIO
+function telaInicio() {
+  S.telaAtual = 'inicio'; S.op = null; S.eqSel = null;
+  var d = S.dados;
+  var erros = ler(CH.ERROS, []);
+  var h = '<h1>Almoxarifado</h1><p class="sub">Escola de Bombeiros · 3 MN' +
+    (d.preInventario ? ' · <span class="chip am">pré-inventário</span>' : '') + '</p>';
+  if (erros.length) {
+    h += '<div class="erro">⚠ ' + erros.length + ' lançamento(s) não foram gravados.<br><button class="linkbtn" onclick="telaErros()">Ver o que aconteceu</button></div>';
+  }
+  h += '<div class="menu">' +
+    '<button class="b-saida" onclick="iniciar(\'SAIDA\')"><span class="ic">➖</span>Saída de material</button>' +
+    '<button class="b-dev" onclick="iniciar(\'DEVOLUCAO\')"><span class="ic">↩️</span>Devolução</button>' +
+    '<button class="b-eq" onclick="telaEquip()"><span class="ic">🔧</span>Ferramentas</button>' +
+    '<button class="b-saldo" onclick="telaSaldo()"><span class="ic">🔍</span>Consultar saldo</button>' +
+    '<button class="b-nao" onclick="telaNaoAchei()"><span class="ic">❓</span>Não achei o item</button>' +
+    '<button class="b-hoje" onclick="telaHoje()"><span class="ic">📋</span>Hoje</button>' +
+    '</div>' +
+    '<div class="rodape">Dados de ' + esc(d.atualizadoEm) + ' · <button class="linkbtn" onclick="atualizarDados()">atualizar</button><br>App v' + esc(d.versao) + '</div>';
+  render(h);
+  faixa();
+}
+function atualizarDados() {
+  aviso('Atualizando…');
+  carregar(true).then(function (ok) { aviso(ok ? 'Dados atualizados ✔' : 'Sem sinal. Usando os dados guardados.'); if (S.telaAtual === 'inicio') telaInicio(); });
+}
+function telaErros() {
+  S.telaAtual = 'erros';
+  var e = ler(CH.ERROS, []);
+  var h = topo('Não gravados') + '<p>Estes lançamentos foram recusados pela planilha. Nada deles foi gravado. Confira e faça de novo, ou lance pelo agente às 15h30.</p>';
+  e.forEach(function (x) {
+    h += '<div class="cartao"><b>' + esc(nomeTipo(x.tipo)) + '</b> · ' + esc(x.quando) + '<br>' + esc(x.pessoa || '') + ' · ' + esc(x.itens) + '<div class="erro">' + esc(x.erro) + '</div></div>';
+  });
+  h += '<button class="btn sec" onclick="limparErros()">Já vi, limpar a lista</button>';
+  render(h);
+}
+function limparErros() { grava(CH.ERROS, []); telaInicio(); }
+function nomeTipo(t) { return { SAIDA: 'Saída', DEVOLUCAO: 'Devolução', RETIRADA_EQ: 'Retirada de ferramenta', DEVOLUCAO_EQ: 'Devolução de ferramenta', PENDENCIA: 'Pendência' }[t] || t; }
+
+// ------------------------------------------------------------ FLUXO MATERIAL (saída e devolução)
+function iniciar(tipo) {
+  S.op = { tipo: tipo, data: hojeLocal(), pessoa: '', setor: '', itens: [], assinatura: null, obs: '' };
+  passoPessoa();
+}
+
+function passoPessoa() {
+  S.telaAtual = 'pessoa';
+  var op = S.op;
+  var dev = op.tipo === 'DEVOLUCAO' || op.tipo === 'DEVOLUCAO_EQ';
+  var titulo = { SAIDA: '➖ Saída', DEVOLUCAO: '↩️ Devolução', RETIRADA_EQ: '🔧 Retirar', DEVOLUCAO_EQ: '🔧 Devolver' }[op.tipo];
+  var nomes = S.dados.pessoas.slice();
+  if (op.tipo === 'DEVOLUCAO') {
+    var ab = Object.keys(S.dados.abertos).filter(function (k) { return Object.keys(S.dados.abertos[k].itens).length; })
+      .map(function (k) { return S.dados.abertos[k].nome; });
+    nomes = ab.concat(nomes.filter(function (n) { return ab.map(norm).indexOf(norm(n)) < 0; }));
+  }
+  if (op.tipo === 'DEVOLUCAO_EQ' && S.eqSel) nomes = S.eqSel.fora.map(function (f) { return f.nome; });
+  var h = topo(titulo, op.tipo.indexOf('_EQ') > 0 ? 'telaEquip()' : 'telaInicio()') +
+    (S.eqSel ? '<div class="cartao"><span class="cod">' + esc(S.eqSel.c) + '</span><br><b>' + esc(S.eqSel.n) + '</b></div>' : '') +
+    '<div class="pergunta">' + (dev ? 'Quem está devolvendo?' : 'Quem está retirando?') + '</div>' +
+    '<input id="nome" placeholder="Digite o nome" value="' + esc(op.pessoa) + '" autocomplete="off" oninput="filtrarNomes()">' +
+    '<div id="nomes" class="lista" style="margin-top:10px"></div>' +
+    '<button class="btn prim" onclick="confirmarPessoa()">Continuar ▶</button>';
+  render(h);
+  S.nomesBase = nomes;
+  filtrarNomes();
+}
+function filtrarNomes() {
+  var q = norm($('nome').value);
+  var l = S.nomesBase.filter(function (n) { return !q || norm(n).indexOf(q) >= 0; }).slice(0, 12);
+  var h = '';
+  l.forEach(function (n, i) {
+    var ab = S.op.tipo === 'DEVOLUCAO' && S.dados.abertos[norm(n)] ? Object.keys(S.dados.abertos[norm(n)].itens).length : 0;
+    h += '<button class="opcao" onclick="escolherNome(' + i + ')"><span class="desc">' + esc(n) + '</span>' +
+      (ab ? '<span class="chip az">' + ab + ' item(ns) com ele</span>' : '') + '</button>';
+  });
+  S.nomesVis = l;
+  $('nomes').innerHTML = h;
+}
+function escolherNome(i) { $('nome').value = S.nomesVis[i]; confirmarPessoa(); }
+function confirmarPessoa() {
+  var n = $('nome').value.replace(/\s+/g, ' ').trim();
+  if (n.length < 2) { aviso('Escreva o nome de quem retira ou devolve.'); return; }
+  // usa a grafia já conhecida, para não criar "Joao" e "João"
+  var igual = S.dados.pessoas.filter(function (p) { return norm(p) === norm(n); })[0];
+  S.op.pessoa = igual || n;
+  if (S.op.tipo === 'SAIDA' || S.op.tipo === 'DEVOLUCAO') passoItens();
+  else passoEquipDetalhe();
+}
+
+function passoItens() {
+  S.telaAtual = 'itens';
+  var op = S.op;
+  var dev = op.tipo === 'DEVOLUCAO';
+  var h = topo(dev ? '↩️ Devolução' : '➖ Saída', 'passoPessoa()') +
+    '<p>' + (dev ? 'Devolvendo: ' : 'Retirando: ') + '<b>' + esc(op.pessoa) + '</b></p>';
+
+  if (dev) {
+    var ab = S.dados.abertos[norm(op.pessoa)];
+    var cods = ab ? Object.keys(ab.itens) : [];
+    if (cods.length) {
+      h += '<h3>Está com ' + esc(op.pessoa) + ' (toque para devolver)</h3><div class="lista">';
+      cods.forEach(function (c) {
+        var it = item(c) || { d: '?' };
+        var ja = op.itens.some(function (x) { return x.codigo === c; });
+        h += '<button class="opcao' + (ja ? ' sel' : '') + '" onclick="addItem(\'' + esc(c) + '\',' + ab.itens[c] + ')"><span><span class="cod">' + esc(c) + '</span><br><span class="desc">' + esc(it.d) + '</span></span><span class="chip az">' + fmtN(ab.itens[c]) + '</span></button>';
+      });
+      h += '</div>';
+    }
+  }
+
+  h += '<h3>Lista (' + op.itens.length + ' item' + (op.itens.length === 1 ? '' : 's') + ')</h3><div class="cartao">';
+  if (!op.itens.length) h += '<p class="sub">Nenhum item ainda.</p>';
+  op.itens.forEach(function (it, i) {
+    h += '<div class="item-carrinho"><div class="txt"><span class="cod">' + esc(it.codigo) + '</span><br><b>' + esc(it.desc) + '</b>' +
+      (dev ? '' : '<br>Saldo: ' + chipSaldo(it.codigo)) +
+      (dev ? '<div class="chips"><button class="' + (it.estado !== 'NAO_ACEITO' ? 'sel' : '') + '" onclick="estadoDev(' + i + ',\'OK\')">✔ Bom</button><button class="' + (it.estado === 'NAO_ACEITO' ? 'sel' : '') + '" onclick="estadoDev(' + i + ',\'NAO_ACEITO\')">✖ Danificado / usado</button></div>' : '') +
+      '</div><div class="qtd"><button onclick="mudaQtd(' + i + ',-1)">−</button><input inputmode="decimal" value="' + esc(it.qtd) + '" onchange="setQtd(' + i + ',this.value)"><button onclick="mudaQtd(' + i + ',1)">+</button></div>' +
+      '<button class="x" onclick="tirarItem(' + i + ')">✖</button></div>';
+  });
+  h += '</div>';
+  h += '<button class="btn sec" onclick="abrirPicker()">＋ ' + (op.itens.length ? 'Adicionar outro item' : 'Escolher item') + '</button>';
+  h += '<label>Setor (se souber)</label><select onchange="S.op.setor=this.value"><option value="">Sem setor</option>' +
+    S.dados.setores.map(function (s) { return '<option value="' + esc(s.c) + '"' + (op.setor === s.c ? ' selected' : '') + '>' + esc(s.c + ' · ' + s.n) + '</option>'; }).join('') + '</select>';
+  h += '<button class="btn prim" ' + (op.itens.length ? '' : 'disabled') + ' onclick="validarItens()">Continuar ▶</button>';
+  render(h);
+}
+function abrirPicker() {
+  telaPicker('Qual material?', function (cod) { addItem(cod, 1); });
+}
+function addItem(cod, q) {
+  var op = S.op;
+  var ja = op.itens.filter(function (x) { return x.codigo === cod; })[0];
+  if (ja) { aviso('Esse item já está na lista. Mude a quantidade.'); passoItens(); return; }
+  var it = item(cod);
+  op.itens.push({ codigo: cod, desc: it ? it.d : '', un: it ? it.u : '', qtd: q || 1, estado: 'OK' });
+  passoItens();
+}
+function mudaQtd(i, d) { var it = S.op.itens[i]; it.qtd = Math.max(1, numBR(it.qtd) + d); passoItens(); }
+function setQtd(i, v) { S.op.itens[i].qtd = Math.max(0, numBR(v)); }
+function tirarItem(i) { S.op.itens.splice(i, 1); passoItens(); }
+function estadoDev(i, e) { S.op.itens[i].estado = e; passoItens(); }
+function validarItens() {
+  var ruim = S.op.itens.filter(function (x) { return !(numBR(x.qtd) > 0); });
+  if (ruim.length) { aviso('Confira a quantidade de ' + ruim[0].codigo + '.'); return; }
+  S.op.itens.forEach(function (x) { x.qtd = numBR(x.qtd); });
+  if (S.op.tipo === 'DEVOLUCAO' && S.op.itens.every(function (x) { return x.estado === 'NAO_ACEITO'; })) {
+    S.op.assinatura = { modo: 'nenhuma' }; passoConfirmar(); return;
+  }
+  passoAssinatura();
+}
+
+// ------------------------------------------------------------ ESCOLHER ITEM (busca + sistema/peça)
+function telaPicker(titulo, cb, voltar) {
+  S.telaAtual = 'picker';
+  S.pickCb = cb;
+  S.pk = S.pk || { q: '', sis: '', peca: '' };
+  var h = topo(titulo, voltar || 'voltarDoPicker()') +
+    '<input id="busca" placeholder="🔎 Digite: joelho 25, cola, fita…" autocomplete="off" value="' + esc(S.pk.q) + '" oninput="S.pk.q=this.value;listarPicker()">' +
+    '<div id="pk-sis" class="chips"></div><div id="pk-peca" class="chips"></div><div id="pk-res" class="lista"></div>';
+  render(h);
+  listarPicker();
+}
+function voltarDoPicker() {
+  if (S.telaAtual === 'picker' && S.op && (S.op.tipo === 'SAIDA' || S.op.tipo === 'DEVOLUCAO')) passoItens();
+  else telaInicio();
+}
+function pkSis(s) { S.pk.sis = S.pk.sis === s ? '' : s; S.pk.peca = ''; listarPicker(); }
+function pkPeca(p) { S.pk.peca = S.pk.peca === p ? '' : p; listarPicker(); }
+function listarPicker() {
+  var pk = S.pk, cad = S.dados.cadastro;
+  $('pk-sis').innerHTML = SISTEMAS.map(function (x) {
+    return '<button class="' + (pk.sis === x.s ? 'sel' : '') + '" onclick="pkSis(\'' + x.s + '\')">' + x.ic + ' ' + x.n + '</button>';
+  }).join('');
+  var hp = '';
+  if (pk.sis) {
+    var pecas = {};
+    cad.forEach(function (x) { if (x.s === pk.sis) pecas[pecaDe(x.c)] = 1; });
+    Object.keys(pecas).sort(function (a, b) { return a === 'OUT' ? 1 : b === 'OUT' ? -1 : 0; }).forEach(function (p) {
+      hp += '<button class="' + (pk.peca === p ? 'sel' : '') + '" onclick="pkPeca(\'' + p + '\')">' + esc(p === 'OUT' ? 'Outros' : S.dados.pecas[p]) + '</button>';
+    });
+  }
+  $('pk-peca').innerHTML = hp;
+
+  var toks = norm(pk.q).split(' ').filter(String);
+  var res = cad.filter(function (x) {
+    if (norm(x.st).indexOf('INATIV') >= 0 || norm(x.st).indexOf('DESCONT') >= 0) return false;
+    if (pk.sis && x.s !== pk.sis) return false;
+    if (pk.peca && pecaDe(x.c) !== pk.peca) return false;
+    if (!toks.length) return !!pk.sis;
+    var alvo = norm(x.c + ' ' + x.d).replace(/-/g, ' ');
+    return toks.every(function (t) { return alvo.indexOf(t) >= 0; });
+  });
+  var h = '';
+  if (!toks.length && !pk.sis) h = '<p class="sub">Digite o nome ou toque no tipo de material.</p>';
+  else if (!res.length) h = '<div class="alerta">Não achei. Confira o que digitou ou use o botão “Não achei o item” na tela inicial.</div>';
+  res.slice(0, 60).forEach(function (x) {
+    var aviso2 = norm(x.st).indexOf('CONFERIR') >= 0 ? ' <span class="chip am">' + esc(x.st) + '</span>' : '';
+    h += '<button class="opcao" onclick="escolherItem(\'' + esc(x.c) + '\')"><span><span class="cod">' + esc(x.c) + '</span>' + aviso2 + '<br><span class="desc">' + esc(x.d) + '</span></span><span class="dir">' + chipSaldo(x.c) + '</span></button>';
+  });
+  if (res.length > 60) h += '<p class="sub">Mostrando 60 de ' + res.length + '. Digite mais para filtrar.</p>';
+  $('pk-res').innerHTML = h;
+}
+function escolherItem(cod) { var cb = S.pickCb; S.pk = null; cb(cod); }
+
+// ------------------------------------------------------------ ASSINATURA (tela ou caderno)
+function passoAssinatura() {
+  S.telaAtual = 'assinatura';
+  var op = S.op;
+  var eq = op.tipo.indexOf('_EQ') > 0;
+  var pref = eq ? 'CEQ' : 'CAD';
+  var a = op.assinatura || { modo: '' };
+  if (!a.folha) { var p = proxFolha(pref); a.folha = p.folha; a.linha = p.linha; }
+  op.assinatura = a;
+  var voltar = eq ? 'passoEquipDetalhe()' : 'passoItens()';
+  var h = topo('Assinatura', voltar) +
+    '<div class="pergunta">Como ' + esc(op.pessoa) + ' vai assinar?</div>' +
+    '<div class="lista">' +
+    '<button class="opcao' + (a.modo === 'tela' ? ' sel' : '') + '" onclick="modoAss(\'tela\')"><span class="desc">✍️ Assinar aqui na tela</span></button>' +
+    '<button class="opcao' + (a.modo === 'papel' ? ' sel' : '') + '" onclick="modoAss(\'papel\')"><span class="desc">📒 Assinou na folha do caderno</span></button>' +
+    '</div><div id="ass-area"></div>';
+  render(h);
+  desenharAss();
+}
+function modoAss(m) { S.op.assinatura.modo = m; S.op.assinatura.png = ''; passoAssinatura(); }
+function desenharAss() {
+  var op = S.op, a = op.assinatura, area = $('ass-area');
+  var eq = op.tipo.indexOf('_EQ') > 0;
+  if (a.modo === 'tela') {
+    area.innerHTML = '<p class="sub" style="margin-top:14px">' + esc(op.pessoa) + ' assina com o dedo:</p>' +
+      '<div class="assin-wrap"><canvas id="assin"></canvas><div class="linha"></div><div class="dica">assinatura de ' + esc(op.pessoa) + '</div></div>' +
+      '<button class="linkbtn" onclick="passoAssinatura()">Limpar e assinar de novo</button>' +
+      '<button class="btn prim" onclick="fimAss()">Continuar ▶</button>';
+    iniciarCanvas();
+  } else if (a.modo === 'papel') {
+    var n = op.itens.length;
+    var pref = eq ? 'CEQ' : 'CAD';
+    var linhas = [];
+    for (var i = 0; i < n; i++) linhas.push(pref + '-' + pad(a.folha, 3) + '-' + pad(Number(a.linha) + i, 2));
+    var passa = Number(a.linha) + n - 1 > S.dados.linhasPorFolha;
+    area.innerHTML = '<div class="cartao"><p>Uma linha do caderno para cada item. Confira com a folha:</p>' +
+      '<div style="display:flex;gap:10px"><div style="flex:1"><label>Folha nº</label><input inputmode="numeric" value="' + a.folha + '" onchange="S.op.assinatura.folha=Number(this.value)||0;desenharAss()"></div>' +
+      '<div style="flex:1"><label>1ª linha</label><input inputmode="numeric" value="' + a.linha + '" onchange="S.op.assinatura.linha=Number(this.value)||0;desenharAss()"></div></div>' +
+      '<p class="sub" style="margin-top:10px">' + op.itens.map(function (it, i) { return '<b>' + linhas[i] + '</b> · ' + esc(it.codigo); }).join('<br>') + '</p>' +
+      (passa ? '<div class="erro">A folha tem ' + S.dados.linhasPorFolha + ' linhas. Os itens passam da última linha: lance o resto em outro lançamento, na folha seguinte.</div>' : '') +
+      '<div class="alerta">Só vale se ' + esc(op.pessoa) + ' assinou nessas linhas do caderno.</div></div>' +
+      '<button class="btn prim" ' + (passa ? 'disabled' : '') + ' onclick="fimAss()">Continuar ▶</button>';
+  } else area.innerHTML = '';
+}
+function iniciarCanvas() {
+  var cv = $('assin'); var ctx = cv.getContext('2d');
+  cv.width = cv.clientWidth; cv.height = cv.clientHeight;
+  ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#0f172a';
+  var des = false, ult = null;
+  S.assTracos = 0;
+  function pos(e) { var r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+  cv.addEventListener('pointerdown', function (e) { des = true; ult = pos(e); cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener('pointermove', function (e) {
+    if (!des) return; var p = pos(e);
+    ctx.beginPath(); ctx.moveTo(ult.x, ult.y); ctx.lineTo(p.x, p.y); ctx.stroke(); ult = p; S.assTracos++;
+  });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (ev) { cv.addEventListener(ev, function () { des = false; }); });
+}
+function fimAss() {
+  var a = S.op.assinatura;
+  if (a.modo === 'tela') {
+    if ((S.assTracos || 0) < 8) { aviso('Falta a assinatura.'); return; }
+    var cv = $('assin');
+    var out = document.createElement('canvas'); out.width = cv.width; out.height = cv.height;
+    var c2 = out.getContext('2d'); c2.fillStyle = '#fff'; c2.fillRect(0, 0, out.width, out.height); c2.drawImage(cv, 0, 0);
+    a.png = out.toDataURL('image/png');
+  } else if (a.modo === 'papel') {
+    if (!(a.folha > 0) || !(a.linha > 0)) { aviso('Falta a folha ou a linha.'); return; }
+  } else { aviso('Escolha como foi a assinatura.'); return; }
+  passoConfirmar();
+}
+
+// ------------------------------------------------------------ CONFIRMAR ("O QUE VOU FAZER")
+function passoConfirmar() {
+  S.telaAtual = 'confirmar';
+  var op = S.op, d = S.dados;
+  var titulo = { SAIDA: 'SAÍDA DE MATERIAL', DEVOLUCAO: 'DEVOLUÇÃO DE CAMPO', RETIRADA_EQ: 'RETIRADA DE FERRAMENTA', DEVOLUCAO_EQ: 'DEVOLUÇÃO DE FERRAMENTA' }[op.tipo];
+  var eq = op.tipo.indexOf('_EQ') > 0;
+  var alertas = [], bloqueio = '';
+  var h = '<h2>📋 O QUE VOU FAZER</h2><div class="cartao">' +
+    '<p><b>' + titulo + '</b></p>' +
+    '<p>' + (op.tipo.indexOf('DEV') === 0 ? 'Quem devolve' : 'Quem retira') + ': <b>' + esc(op.pessoa) + '</b></p>' +
+    '<p>Data: <input type="date" style="width:auto;padding:6px 8px;font-size:17px" value="' + op.data + '" max="' + hojeLocal() + '" onchange="S.op.data=this.value"></p>' +
+    '<p>Setor: <b>' + esc(op.setor || 'sem setor') + '</b></p>' +
+    '<p>Assinatura: <b>' + (op.assinatura.modo === 'tela' ? '✍️ na tela ✔' : op.assinatura.modo === 'papel' ? '📒 caderno, folha ' + pad(op.assinatura.folha, 3) : '—') + '</b></p>';
+
+  h += '<table class="quadro"><tr><th>Item</th><th>Qtd</th><th>' + (eq ? 'Estado' : 'Saldo') + '</th></tr>';
+  var consumo = {};
+  op.itens.forEach(function (it, i) {
+    var col3 = '';
+    if (op.tipo === 'SAIDA') {
+      consumo[it.codigo] = (consumo[it.codigo] || 0) + it.qtd;
+      var s = saldo(it.codigo); var antes = s ? s.saldo : 0; var dep = antes - consumo[it.codigo];
+      col3 = fmtN(antes) + ' → <b>' + fmtN(dep) + '</b>';
+      it.confirmouNegativo = false;
+      if (dep < 0) {
+        if (d.preInventario) alertas.push(it.codigo + ': saldo fica ' + fmtN(dep) + '. Pré-inventário: vai gravar e anotar.');
+        else {
+          col3 += '<br><label style="font-weight:600;margin:6px 0"><input type="checkbox" style="width:auto" onchange="S.op.itens[' + i + '].confirmouNegativo=this.checked;checarConf()"> Saldo negativo. Já falei com Julio ou Edton</label>';
+          bloqueio = 'neg';
+        }
+      }
+    } else if (op.tipo === 'DEVOLUCAO') {
+      var s2 = saldo(it.codigo); var a2 = s2 ? s2.saldo : 0;
+      col3 = it.estado === 'NAO_ACEITO' ? '<span class="chip neg">NÃO ACEITO</span>' : fmtN(a2) + ' → <b>' + fmtN(a2 + it.qtd) + '</b>';
+      if (it.estado === 'NAO_ACEITO') alertas.push(it.codigo + ': danificado/usado NÃO entra no saldo. Vai para pendências (POP-08).');
+      var ab = d.abertos[norm(op.pessoa)];
+      var tem = ab && ab.itens[it.codigo] || 0;
+      if (it.estado !== 'NAO_ACEITO' && !tem) alertas.push(it.codigo + ': não achei saída para ' + op.pessoa + '. Vai gravar com "origem não localizada".');
+      else if (it.estado !== 'NAO_ACEITO' && it.qtd > tem) { alertas.push(it.codigo + ': ' + op.pessoa + ' só tem ' + fmtN(tem) + '. Devolução maior que a saída não pode.'); bloqueio = 'dev'; }
+    } else {
+      col3 = esc(it.estado || 'OK');
+      if (op.tipo === 'DEVOLUCAO_EQ' && it.estado && it.estado !== 'OK') alertas.push(it.codigo + ' voltou ' + it.estado + ': avisar Julio, Edton e Mário hoje e separar.');
+    }
+    h += '<tr><td><span class="cod">' + esc(it.codigo) + '</span><br>' + esc(it.desc) + '</td><td><b>' + fmtN(it.qtd) + '</b></td><td>' + col3 + '</td></tr>';
+  });
+  h += '</table>';
+  h += '<label>Observação (opcional)</label><input value="' + esc(op.obs) + '" onchange="S.op.obs=this.value">';
+  alertas.forEach(function (a) { h += '<div class="alerta">⚠ ' + esc(a) + '</div>'; });
+
+  var onde = op.tipo === 'SAIDA' ? 'Estoque › aba Saidas' : op.tipo === 'DEVOLUCAO' ? 'Estoque › aba Entradas (DEVOLUÇÃO DE CAMPO)' : 'Ferramentas › abas Movimentacao e Equipamentos';
+  h += '<p class="sub" style="margin-top:12px">VOU GRAVAR EM: ' + onde + (op.assinatura.modo === 'tela' ? ' + foto da assinatura no Drive' : '') + '</p></div>';
+  h += '<div class="pergunta">Posso fazer?</div>' +
+    '<button id="bt-sim" class="btn prim" onclick="confirmar()">✔ SIM, gravar</button>' +
+    '<button class="btn sec" onclick="voltarConf()">✖ NÃO, voltar e mudar</button>';
+  S.bloqueio = bloqueio;
+  render(h);
+  checarConf();
+}
+function checarConf() {
+  var b = $('bt-sim'); if (!b) return;
+  var ok = true;
+  if (S.bloqueio === 'dev') ok = false;
+  if (S.bloqueio === 'neg') ok = S.op.itens.every(function (it) {
+    var s = saldo(it.codigo); return (s ? s.saldo : 0) - it.qtd >= 0 || it.confirmouNegativo;
+  });
+  b.disabled = !ok;
+}
+function voltarConf() {
+  if (S.op.tipo.indexOf('_EQ') > 0) passoEquipDetalhe(); else passoItens();
+}
+function confirmar() {
+  var op = S.op;
+  if (op.data > hojeLocal()) { aviso('A data não pode ser no futuro.'); return; }
+  op.id = uid(); op.pin = S.pin;
+  if (op.assinatura.modo === 'papel') avancarFolha(op.tipo.indexOf('_EQ') > 0 ? 'CEQ' : 'CAD', op.assinatura.folha, op.assinatura.linha, op.itens.length);
+  S.ultimoId = op.id; S.ultimoOp = op;
+  enfileirar(JSON.parse(JSON.stringify(op)));
+  S.op = null;
+  telaResultado();
+}
+
+function telaResultado() {
+  S.telaAtual = 'resultado';
+  var op = S.ultimoOp, r = S.resultados[op.id];
+  var h = '';
+  if (!r) {
+    h = S.offline
+      ? '<div class="okbox" style="background:var(--amar2);color:#713f12">📵 Sem sinal agora.<br>O lançamento ficou GUARDADO no celular e sobe sozinho quando o sinal voltar. Pode continuar trabalhando.</div>'
+      : '<div class="carregando">⏳ Gravando na planilha…</div>';
+  } else if (r.ok) {
+    h = '<div class="okbox">✔ Gravado!' + (r.numero ? '<br>Nº ' + esc(r.numero) : '') + (r.linhas ? ' · ' + r.linhas + ' linha(s)' : '') + '</div>';
+    (r.avisos || []).forEach(function (a) { h += '<div class="alerta">⚠ ' + esc(a) + '</div>'; });
+    if (op.assinatura && op.assinatura.modo === 'papel') h += '<p>Marque na folha do caderno: <b>“Lançado / ' + br(hojeLocal()).slice(0, 5) + '”</b>.</p>';
+  } else {
+    h = '<div class="erro">✖ NÃO foi gravado.<br>' + esc(r.erro) + '</div><p>Nada foi gravado. Confira e faça de novo, ou lance pelo agente às 15h30.</p>';
+  }
+  var prox = op.tipo.indexOf('_EQ') > 0 ? ['telaEquip()', '🔧 Outra ferramenta'] : op.tipo === 'PENDENCIA' ? ['telaNaoAchei()', '❓ Outra pendência']
+    : op.tipo === 'DEVOLUCAO' ? ['iniciar(\'DEVOLUCAO\')', '↩️ Outra devolução'] : ['iniciar(\'SAIDA\')', '➖ Outra saída'];
+  h += '<button class="btn prim" onclick="' + prox[0] + '">' + prox[1] + '</button>' +
+    '<button class="btn sec" onclick="telaInicio()">🏠 Tela inicial</button>';
+  render(h);
+  faixa();
+}
+
+// ------------------------------------------------------------ CONSULTAR SALDO
+function telaSaldo() {
+  S.op = null;
+  telaPicker('🔍 Consultar saldo', function (cod) { mostrarSaldo(cod); }, 'telaInicio()');
+}
+function mostrarSaldo(cod) {
+  S.telaAtual = 'saldo';
+  var it = item(cod) || { d: '', u: '' }, s = saldo(cod);
+  var cor = !s ? 'var(--amar)' : s.saldo < 0 ? 'var(--verm)' : 'var(--verde)';
+  var h = topo('Saldo', 'telaSaldo()') + '<div class="cartao"><span class="cod">' + esc(cod) + '</span><h2>' + esc(it.d) + '</h2>' +
+    '<div class="grande" style="color:' + cor + '">' + (s ? fmtN(s.saldo) : '—') + ' <span style="font-size:22px">' + esc(it.u) + '</span></div>' +
+    '<p>' + (s ? esc(s.sit) : 'Sem linha na aba Estoque') + '</p>' +
+    '<p class="sub">Última contagem: ' + (s && s.ult ? br(s.ult) : 'nunca contado') + '</p>' +
+    (s && s.saldo < 0 ? '<div class="alerta">Saldo negativo: falta lançar entrada ou o item não foi contado. Normal antes do inventário.</div>' : '') +
+    '</div>';
+  var quem = [];
+  Object.keys(S.dados.abertos).forEach(function (k) { var q = S.dados.abertos[k].itens[cod]; if (q > 0) quem.push(S.dados.abertos[k].nome + ': ' + fmtN(q)); });
+  if (quem.length) h += '<h3>Retirado e ainda não devolvido</h3><div class="cartao">' + quem.map(esc).join('<br>') + '</div>';
+  h += '<button class="btn sec" onclick="telaSaldo()">🔍 Consultar outro</button><button class="btn sec" onclick="telaInicio()">🏠 Tela inicial</button>';
+  render(h);
+}
+
+// ------------------------------------------------------------ FERRAMENTAS E EQUIPAMENTOS
+function telaEquip() {
+  S.telaAtual = 'equip'; S.op = null; S.eqSel = null;
+  var h = topo('🔧 Ferramentas') +
+    '<input id="bq" placeholder="🔎 Nome ou código (EQP-…)" autocomplete="off" oninput="listarEquip()">' +
+    '<div class="chips" id="eq-f"></div><div id="eq-res" class="lista"></div>';
+  render(h);
+  S.eqFiltro = S.eqFiltro || 'todos';
+  listarEquip();
+}
+function eqFiltro(f) { S.eqFiltro = f; listarEquip(); }
+function statusEq(x) {
+  if (/MANUTEN|BAIXAD/.test(norm(x.st))) return '<span class="chip neg">' + esc(x.st) + '</span>';
+  if (x.lote > 1) return x.qtdFora ? '<span class="chip am">' + x.disp + ' de ' + x.lote + ' aqui</span>' : '<span class="chip ok">' + x.lote + ' aqui</span>';
+  if (x.qtdFora) return '<span class="chip am">com ' + esc(x.fora[0].nome) + '</span>';
+  return '<span class="chip ok">disponível</span>';
+}
+function listarEquip() {
+  var f = S.eqFiltro;
+  $('eq-f').innerHTML = [['todos', 'Todos'], ['aqui', 'Disponíveis'], ['fora', 'Fora']].map(function (x) {
+    return '<button class="' + (f === x[0] ? 'sel' : '') + '" onclick="eqFiltro(\'' + x[0] + '\')">' + x[1] + '</button>';
+  }).join('');
+  var toks = norm($('bq').value).split(' ').filter(String);
+  var l = S.dados.equip.filter(function (x) {
+    if (f === 'aqui' && !x.disp) return false;
+    if (f === 'fora' && !x.qtdFora) return false;
+    var alvo = norm(x.c + ' ' + x.n + ' ' + x.tipo);
+    return toks.every(function (t) { return alvo.indexOf(t) >= 0; });
+  });
+  var h = '';
+  if (!S.dados.equip.length) h = '<div class="alerta">Nenhuma ferramenta cadastrada ainda. O cadastro vem do levantamento do inventário (agente CONTAGEM).</div>';
+  l.forEach(function (x) {
+    h += '<button class="opcao" onclick="abrirEquip(\'' + esc(x.c) + '\')"><span><span class="cod">' + esc(x.c) + '</span><br><span class="desc">' + esc(x.n) + '</span>' +
+      (x.qtdFora && x.desde ? '<br><span class="sub">desde ' + br(x.desde) + '</span>' : '') + '</span><span class="dir">' + statusEq(x) + '</span></button>';
+  });
+  $('eq-res').innerHTML = h || '<p class="sub">Nada encontrado.</p>';
+}
+function abrirEquip(cod) {
+  S.telaAtual = 'equip-item';
+  var x = S.dados.equip.filter(function (y) { return y.c === cod; })[0];
+  S.eqSel = x;
+  var bloq = /MANUTEN|BAIXAD/.test(norm(x.st));
+  var h = topo('🔧 ' + esc(x.c), 'telaEquip()') + '<div class="cartao"><h2>' + esc(x.n) + '</h2><p>' + statusEq(x) + '</p>' +
+    (x.lote > 1 ? '<p class="sub">Lote de ' + x.lote + ' unidades</p>' : '') +
+    x.fora.map(function (f) { return '<p>Com <b>' + esc(f.nome) + '</b>' + (x.lote > 1 ? ' (' + f.qtd + ')' : '') + (f.desde ? ' desde ' + br(f.desde) : '') + '</p>'; }).join('') +
+    '</div>';
+  if (bloq) h += '<div class="alerta">Está "' + esc(x.st) + '". Não pode sair.</div>';
+  if (x.disp > 0 && !bloq) h += '<button class="btn perigo" onclick="iniciarEq(\'RETIRADA_EQ\')">➖ RETIRAR</button>';
+  if (x.qtdFora > 0) h += '<button class="btn prim" onclick="iniciarEq(\'DEVOLUCAO_EQ\')">↩️ DEVOLVER</button>';
+  render(h);
+}
+function iniciarEq(tipo) {
+  var x = S.eqSel;
+  S.op = { tipo: tipo, data: hojeLocal(), pessoa: '', setor: '', obs: '', assinatura: null,
+    itens: [{ codigo: x.c, desc: x.n, qtd: 1, estado: 'OK' }] };
+  if (tipo === 'DEVOLUCAO_EQ' && x.fora.length === 1) S.op.pessoa = x.fora[0].nome;
+  passoPessoa();
+}
+function passoEquipDetalhe() {
+  S.telaAtual = 'equip-det';
+  var op = S.op, x = S.eqSel, it = op.itens[0], ret = op.tipo === 'RETIRADA_EQ';
+  var com = x.fora.filter(function (f) { return norm(f.nome) === norm(op.pessoa); })[0];
+  var max = ret ? x.disp : (com ? com.qtd : x.qtdFora);
+  var h = topo(ret ? '➖ Retirar' : '↩️ Devolver', 'passoPessoa()') +
+    '<div class="cartao"><span class="cod">' + esc(x.c) + '</span><br><b>' + esc(x.n) + '</b><br>' + (ret ? 'Retira: ' : 'Devolve: ') + '<b>' + esc(op.pessoa) + '</b></div>';
+  if (!ret && !com) {
+    h += '<div class="alerta">⚠ Na planilha, está com ' + esc(x.fora.map(function (f) { return f.nome; }).join(', ')) + ', não com ' + esc(op.pessoa) + '.</div>' +
+      '<label><input type="checkbox" style="width:auto" ' + (it.confirmaOutraPessoa ? 'checked' : '') + ' onchange="S.op.itens[0].confirmaOutraPessoa=this.checked"> Confirmo: ' + esc(op.pessoa) + ' devolveu no lugar de ' + esc(x.fora[0].nome) + '</label>';
+    it.de = x.fora[0].nome;
+  }
+  if (x.lote > 1) {
+    h += '<label>Quantidade (máx. ' + max + ')</label><div class="qtd"><button onclick="eqQtd(-1,' + max + ')">−</button><input inputmode="numeric" id="eqq" value="' + it.qtd + '" onchange="S.op.itens[0].qtd=Math.min(' + max + ',Math.max(1,Number(this.value)||1))"><button onclick="eqQtd(1,' + max + ')">+</button></div>';
+  }
+  h += '<div class="pergunta">' + (ret ? 'Estado na saída' : 'Como voltou?') + '</div><div class="chips">' +
+    ['OK', 'Defeito', 'Quebrado'].map(function (e) { return '<button class="' + (it.estado === e ? 'sel' : '') + '" onclick="S.op.itens[0].estado=\'' + e + '\';passoEquipDetalhe()">' + (e === 'OK' ? '✔ OK' : e === 'Defeito' ? '⚠ Defeito' : '✖ Quebrado') + '</button>'; }).join('') + '</div>';
+  if (!ret && it.estado !== 'OK') h += '<div class="alerta">Separe o item e avise Julio, Edton e Mário hoje.</div>';
+  if (ret) {
+    h += '<label>Setor (se souber)</label><select onchange="S.op.setor=this.value"><option value="">Sem setor</option>' +
+      S.dados.setores.map(function (s) { return '<option value="' + esc(s.c) + '"' + (op.setor === s.c ? ' selected' : '') + '>' + esc(s.c + ' · ' + s.n) + '</option>'; }).join('') + '</select>';
+  }
+  h += '<button class="btn prim" onclick="fimEquipDetalhe()">Continuar ▶</button>';
+  render(h);
+}
+function eqQtd(d, max) { var it = S.op.itens[0]; it.qtd = Math.min(max, Math.max(1, it.qtd + d)); $('eqq').value = it.qtd; }
+function fimEquipDetalhe() {
+  var op = S.op, x = S.eqSel, it = op.itens[0];
+  if (op.tipo === 'DEVOLUCAO_EQ' && !x.fora.some(function (f) { return norm(f.nome) === norm(op.pessoa); }) && !it.confirmaOutraPessoa) {
+    aviso('Confirme quem está devolvendo.'); return;
+  }
+  passoAssinatura();
+}
+
+// ------------------------------------------------------------ NÃO ACHEI O ITEM (pendência p/ POP-04)
+function telaNaoAchei() {
+  S.telaAtual = 'naoachei'; S.op = null;
+  var h = topo('❓ Não achei o item') +
+    '<p>Anote aqui. No lote das 15h30 o agente procura no Cadastro, cria o código se for novo (POP-04) e lança. <b>Não invente código.</b></p>' +
+    '<label>É saída ou devolução?</label><select id="na-mov"><option>SAÍDA</option><option>DEVOLUÇÃO</option><option>ENTRADA (nota)</option></select>' +
+    '<label>Descrição (como a pessoa chama, com medida)</label><input id="na-desc" placeholder="ex.: bucha de redução 50x40">' +
+    '<label>Quantidade</label><input id="na-qtd" inputmode="decimal" value="1">' +
+    '<label>Quem retira ou devolve</label><input id="na-pes" list="na-pl"><datalist id="na-pl">' + S.dados.pessoas.map(function (p) { return '<option value="' + esc(p) + '">'; }).join('') + '</datalist>' +
+    '<label>Observação</label><input id="na-obs" placeholder="ex.: anotado no caderno folha 12 linha 5">' +
+    '<button class="btn prim" onclick="enviarNaoAchei()">✔ Anotar pendência</button>';
+  render(h);
+}
+function enviarNaoAchei() {
+  var op = { tipo: 'PENDENCIA', id: uid(), pin: S.pin, movimento: $('na-mov').value, descricao: $('na-desc').value.trim(),
+    qtd: numBR($('na-qtd').value), pessoa: $('na-pes').value.trim(), obs: $('na-obs').value.trim(), itens: [] };
+  if (op.descricao.length < 3) { aviso('Escreva a descrição.'); return; }
+  if (!(op.qtd > 0)) { aviso('Confira a quantidade.'); return; }
+  S.ultimoId = op.id; S.ultimoOp = op;
+  enfileirar(op);
+  telaResultado();
+}
+
+// ------------------------------------------------------------ HOJE
+function telaHoje() {
+  S.telaAtual = 'hoje';
+  render(topo('📋 Hoje') + '<div class="carregando">Buscando…</div>');
+  rpc('api_hoje', S.pin).then(function (r) {
+    if (S.telaAtual !== 'hoje') return;
+    if (!r.ok) { render(topo('📋 Hoje') + '<div class="erro">' + esc(r.erro) + '</div>'); return; }
+    var h = topo('📋 Hoje');
+    var n = fila().length;
+    if (n) h += '<div class="alerta">⏳ ' + n + ' lançamento(s) ainda no celular, esperando sinal.</div>';
+    h += '<h3>Lançado pelo app hoje (' + r.lancamentos.length + ')</h3><div class="cartao">';
+    if (!r.lancamentos.length) h += '<p class="sub">Nada ainda.</p>';
+    r.lancamentos.forEach(function (l) {
+      h += '<p><b>' + esc(l.hora) + '</b> · ' + esc(nomeTipo(l.tipo)) + ' · ' + esc(l.numero) + '<br><span class="sub">' + esc(l.pessoa) + ' · ' + esc(l.itens) + '</span></p>';
+    });
+    h += '</div>';
+    var f24 = r.fora.filter(function (f) { return f.mais24h; });
+    h += '<h3>Ferramentas fora (' + r.fora.length + ')' + (f24.length ? ' · <span class="chip neg">' + f24.length + ' há mais de 1 dia</span>' : '') + '</h3><div class="cartao">';
+    if (!r.fora.length) h += '<p class="sub">Tudo no almoxarifado.</p>';
+    r.fora.forEach(function (f) {
+      h += '<p>' + (f.mais24h ? '🔴 ' : '') + '<b>' + esc(f.c) + '</b> ' + esc(f.n) + '<br><span class="sub">com ' + esc(f.nome) + (f.qtd > 1 ? ' (' + f.qtd + ')' : '') + (f.desde ? ' desde ' + esc(f.desde) : '') + '</span></p>';
+    });
+    h += '</div><h3>Pendências abertas (' + r.pendencias.length + ')</h3><div class="cartao">';
+    if (!r.pendencias.length) h += '<p class="sub">Nenhuma.</p>';
+    r.pendencias.forEach(function (p) {
+      h += '<p><b>' + esc(p.tipo) + '</b><br>' + esc(p.desc) + ' · ' + esc(p.qtd) + '<br><span class="sub">' + esc(p.pessoa) + ' · ' + esc(p.quando) + '</span></p>';
+    });
+    h += '</div><p class="sub">As pendências são resolvidas no lote das 15h30 pelos agentes.</p>';
+    render(h);
+  }).catch(function () { if (S.telaAtual === 'hoje') render(topo('📋 Hoje') + '<div class="erro">Sem sinal agora. Tente de novo daqui a pouco.</div>'); });
+}
+
+// ------------------------------------------------------------ PARTIDA
+(function partida() {
+  S.pin = ler(CH.PIN, '') || '';
+  var cache = ler(CH.DADOS, null);
+  if (cache) { S.dados = cache; reaplicarFila(); telaInicio(); }
+  carregar(!!cache).then(function (ok) {
+    if (ok && (!cache || S.telaAtual === 'inicio')) telaInicio();
+    processarFila();
+  });
+})();
+</script>

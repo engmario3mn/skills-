@@ -1,0 +1,101 @@
+<style>
+  :root {
+    --verm: #b91c1c; --verm2: #fee2e2; --verde: #15803d; --verde2: #dcfce7;
+    --amar: #a16207; --amar2: #fef3c7; --azul: #1d4ed8; --azul2: #dbeafe;
+    --cinza: #475569; --cinza2: #f1f5f9; --borda: #cbd5e1; --texto: #0f172a;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: #f8fafc; color: var(--texto);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 18px; }
+  main { max-width: 640px; margin: 0 auto; padding: 12px 14px 96px; }
+  h1 { font-size: 22px; margin: 4px 0 2px; }
+  h2 { font-size: 21px; margin: 6px 0 12px; }
+  h3 { font-size: 18px; margin: 16px 0 8px; color: var(--cinza); }
+  p { margin: 6px 0; line-height: 1.35; }
+  .sub { color: var(--cinza); font-size: 15px; }
+  .carregando { padding: 60px 0; text-align: center; color: var(--cinza); }
+
+  #faixa { position: sticky; top: 0; z-index: 5; }
+  .faixa { padding: 7px 14px; font-size: 15px; font-weight: 600; text-align: center; }
+  .faixa.teste { background: #7c3aed; color: #fff; }
+  .faixa.fila { background: var(--amar2); color: var(--amar); }
+  .faixa.off { background: #334155; color: #fff; }
+
+  .topo { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .topo .voltar { border: 0; background: var(--cinza2); font-size: 18px; padding: 10px 14px; border-radius: 12px; }
+  .chip { display: inline-block; padding: 3px 9px; border-radius: 99px; font-size: 13px; font-weight: 700; }
+  .chip.ok { background: var(--verde2); color: var(--verde); }
+  .chip.neg { background: var(--verm2); color: var(--verm); }
+  .chip.am { background: var(--amar2); color: var(--amar); }
+  .chip.az { background: var(--azul2); color: var(--azul); }
+
+  .menu { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
+  .menu button { min-height: 118px; border: 0; border-radius: 18px; font-size: 19px; font-weight: 700;
+    color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+    box-shadow: 0 2px 0 rgba(0,0,0,.15); }
+  .menu button .ic { font-size: 38px; line-height: 1; }
+  .menu .b-saida { background: #dc2626; }
+  .menu .b-dev { background: #16a34a; }
+  .menu .b-eq { background: #ea580c; }
+  .menu .b-saldo { background: #2563eb; }
+  .menu .b-nao { background: #64748b; }
+  .menu .b-hoje { background: #0f766e; }
+
+  .btn { display: block; width: 100%; border: 0; border-radius: 14px; padding: 17px 14px; font-size: 19px;
+    font-weight: 700; margin: 10px 0; }
+  .btn.prim { background: var(--verde); color: #fff; }
+  .btn.sec { background: var(--cinza2); color: var(--texto); border: 2px solid var(--borda); }
+  .btn.perigo { background: var(--verm); color: #fff; }
+  .btn:disabled { opacity: .45; }
+  .linkbtn { background: none; border: 0; color: var(--azul); font-size: 16px; text-decoration: underline; padding: 8px 0; }
+
+  input, select, textarea { width: 100%; font-size: 19px; padding: 13px 12px; border: 2px solid var(--borda);
+    border-radius: 12px; background: #fff; color: var(--texto); }
+  input:focus, select:focus { outline: 3px solid var(--azul2); border-color: var(--azul); }
+  label { display: block; font-weight: 700; margin: 14px 0 6px; }
+
+  .lista { display: flex; flex-direction: column; gap: 8px; }
+  .opcao { display: flex; align-items: center; justify-content: space-between; gap: 10px; text-align: left;
+    width: 100%; border: 2px solid var(--borda); background: #fff; border-radius: 14px; padding: 13px 14px; font-size: 18px; }
+  .opcao:active, .opcao.sel { border-color: var(--azul); background: var(--azul2); }
+  .opcao .cod { font-size: 13px; color: var(--cinza); font-weight: 700; letter-spacing: .3px; }
+  .opcao .desc { font-weight: 600; }
+  .opcao .dir { text-align: right; white-space: nowrap; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+  .chips button { border: 2px solid var(--borda); background: #fff; border-radius: 12px; padding: 10px 12px;
+    font-size: 17px; font-weight: 700; }
+  .chips button.sel { background: var(--azul); border-color: var(--azul); color: #fff; }
+
+  .cartao { background: #fff; border: 2px solid var(--borda); border-radius: 16px; padding: 14px; margin: 10px 0; }
+  .grande { font-size: 46px; font-weight: 800; line-height: 1.1; }
+  .item-carrinho { display: flex; align-items: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--borda); }
+  .item-carrinho:last-child { border-bottom: 0; }
+  .item-carrinho .txt { flex: 1; min-width: 0; }
+  .qtd { display: flex; align-items: center; gap: 6px; }
+  .qtd button { width: 46px; height: 46px; border-radius: 12px; border: 2px solid var(--borda); background: #fff; font-size: 24px; font-weight: 800; }
+  .qtd input { width: 74px; text-align: center; padding: 10px 4px; }
+  .x { border: 0; background: none; font-size: 24px; color: var(--verm); padding: 6px; }
+
+  table.quadro { width: 100%; border-collapse: collapse; font-size: 16px; }
+  table.quadro th, table.quadro td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--borda); vertical-align: top; }
+  table.quadro th { font-size: 13px; color: var(--cinza); text-transform: uppercase; }
+  .alerta { background: var(--amar2); color: #713f12; border-radius: 12px; padding: 10px 12px; margin: 8px 0; font-weight: 600; }
+  .erro { background: var(--verm2); color: #7f1d1d; border-radius: 12px; padding: 10px 12px; margin: 8px 0; font-weight: 600; }
+  .okbox { background: var(--verde2); color: #14532d; border-radius: 12px; padding: 14px; margin: 8px 0; font-weight: 600; }
+  .pergunta { font-size: 20px; font-weight: 800; margin: 18px 0 8px; }
+
+  .assin-wrap { position: relative; background: #fff; border: 2px dashed var(--cinza); border-radius: 14px; }
+  canvas#assin { display: block; width: 100%; height: 210px; touch-action: none; border-radius: 14px; }
+  .assin-wrap .linha { position: absolute; left: 16px; right: 16px; bottom: 44px; border-bottom: 2px solid var(--borda); pointer-events: none; }
+  .assin-wrap .dica { position: absolute; left: 16px; bottom: 14px; color: var(--cinza); font-size: 14px; pointer-events: none; }
+
+  .pin { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 320px; margin: 16px auto; }
+  .pin button { height: 64px; font-size: 26px; font-weight: 800; border-radius: 14px; border: 2px solid var(--borda); background: #fff; }
+  .pin-vis { text-align: center; font-size: 34px; letter-spacing: 14px; min-height: 46px; }
+
+  .aviso { position: fixed; left: 12px; right: 12px; bottom: 16px; z-index: 20; max-width: 616px; margin: 0 auto;
+    background: #0f172a; color: #fff; padding: 14px 16px; border-radius: 14px; font-size: 17px; box-shadow: 0 6px 20px rgba(0,0,0,.3); }
+  .escondido { display: none; }
+  .rodape { margin-top: 22px; text-align: center; color: var(--cinza); font-size: 14px; }
+</style>
