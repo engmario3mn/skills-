@@ -185,7 +185,8 @@ var IDS_REAIS = {
   ESTOQUE: '1E816n7h6zXAJ47p1JEkcS7CCNX9xPlq13qANaS8jW1Y',
   EQUIP: '1kSNYdh87fQ_Hm6r_DbHXnukBR6tvC9njNzgiYotb_fo',
   PASTA_ALMOX: '1JYmPSOvkyddaPlMW5lghFruH60WkpKEC',
-  PASTA_REQUISICOES: '1LE6jpaFZ704GND7XM7mQL31mB7SFjdZ6'
+  PASTA_REQUISICOES: '1LE6jpaFZ704GND7XM7mQL31mB7SFjdZ6',
+  PASTA_APP: '1dod2jP1oGUegqbCFlPcHVVk70JTqWkcF' // Drive > Claude Code > App Almoxarifado Bombeiros
 };
 
 var PECAS = {
@@ -211,7 +212,8 @@ function include(nome) {
 /** Cria CÓPIAS das planilhas numa pasta de teste e aponta o app para elas. */
 function instalarTeste() {
   const hoje = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
-  const pasta = DriveApp.createFolder('APP ALMOXARIFADO - TESTE ' + hoje);
+  // a pasta de teste fica dentro de "Claude Code > App Almoxarifado Bombeiros"
+  const pasta = DriveApp.getFolderById(IDS_REAIS.PASTA_APP).createFolder('TESTE ' + hoje);
   const est = DriveApp.getFileById(IDS_REAIS.ESTOQUE).makeCopy('TESTE - Controle de Estoque - Materiais', pasta);
   const eq = DriveApp.getFileById(IDS_REAIS.EQUIP).makeCopy('TESTE - Controle de Ferramentas e Equipamentos', pasta);
   const ass = pasta.createFolder('ASSINATURAS APP');

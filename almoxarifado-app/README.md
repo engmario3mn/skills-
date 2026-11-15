@@ -36,7 +36,7 @@ Ficam com os agentes do Claude, como hoje: **nota fiscal (ENTRADA)**, **transfer
    - `Code.gs`: cole no arquivo que já existe.
    - **+ › HTML**, com os nomes `Index`, `Styles` e `App` (sem ".html"), um para cada arquivo.
    - Em ⚙️ **Configurações do projeto**, marque *"Mostrar o arquivo de manifesto appsscript.json"* e cole o `appsscript.json`.
-3. **Teste primeiro, nas cópias:** no topo, escolha a função `instalarTeste` e clique **Executar**. Autorize o acesso às Planilhas e ao Drive. Ela cria no seu Drive a pasta **"APP ALMOXARIFADO - TESTE aaaa-mm-dd"** com:
+3. **Teste primeiro, nas cópias:** no topo, escolha a função `instalarTeste` e clique **Executar**. Autorize o acesso às Planilhas e ao Drive. Ela cria no Drive, dentro de **Claude Code › App Almoxarifado Bombeiros**, a pasta **"TESTE aaaa-mm-dd"** com:
    - cópias das duas planilhas;
    - a planilha **Registro** (Log + Pendências);
    - a pasta de assinaturas.
@@ -61,6 +61,19 @@ A faixa roxa "MODO TESTE" some.
 ### Atualizar o app depois
 
 Cole os arquivos novos e faça **Implantar › Gerenciar implantações › ✏️ › Versão: Nova versão**. O link não muda.
+
+## Onde está cada coisa no Drive
+
+| O quê | Pasta |
+|---|---|
+| Cópia do código, deste guia e a pasta de TESTE | Claude Code › **App Almoxarifado Bombeiros** |
+| Prompts novos (SAIDA v1.3, EQUIP v1.3, FECHAMENTO v1.1, Instruções v1.1) | 2. Almoxarifado › PROCEDIMENTOS E TREINAMENTO › **Agentes de IA - Almoxarifado** |
+| POP-09 (App do Almoxarifado) | … › **Pop`s almoxarifado** |
+| Planilhas de Estoque e de Ferramentas | onde já estão (CONTROLE ESTOQUE) |
+| Registro do App (Log e Pendências), em produção | pasta geral do almoxarifado |
+| Assinaturas feitas na tela, em produção | REQUISIÇÕES › ASSINATURAS APP › aaaa-mm |
+
+Os textos dos prompts e do POP-09 ficam em `documentos/` (fonte em .md e PDF em `documentos/pdf/`). Para gerar os PDFs de novo: `python3 documentos/gerar_pdfs.py`.
 
 ## O que muda na rotina e nos agentes
 
